@@ -1,4 +1,6 @@
 import express from "express";
+import cors from "cors";
+
 import dotenv from "dotenv";
 import { authRouter } from "./routes/auth.route.ts";
 import { adminRouter } from "./routes/admin.route.ts";
@@ -8,6 +10,13 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 8000;
+
+// Allow requests from your frontend development server
+app.use(cors({
+  origin: 'https://node-auth-app-supabase.onrender.com',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 
 // 2. Standard Middlewares
 app.use(express.json()); // Corrected from app.use(express())
