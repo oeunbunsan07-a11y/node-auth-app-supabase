@@ -80,86 +80,196 @@ export const registerHandler = async (req: any, res: any) => {
 
 export const loginHandler = async (req: any, res: any) => {
     try {
-        // 1. Collect the user input
         const { email, password }: any = req.body;
-
-        // 2. Validate the input
         if (!email || !password) {
-            return res.status(400).json({
-                success: false,
-                message: "All fields are required."
-            });
+            return res.status(400).json({ success: false, message: "All fields are required." });
         }
 
-        // 3. Find user
-        // FIX: Destructured { data: user, error } to correctly extract the table row
         const { data: user, error: fetchError } = await supabase
-            .from('users')
-            .select('*')
-            .eq('email', email)
-            .maybeSingle();
+            .from('users').select('*').eq('email', email).maybeSingle();
 
-        if (fetchError) {
-            return res.status(500).json({ success: false, message: fetchError.message });
+        if (fetchError || !user) {
+            return res.status(401).json({ success: false, message: "Invalid credentials" });
         }
 
-        // FIX: Check if the actual 'user' data payload is missing
-        if (!user) {
-            return res.status(401).json({
-                success: false,
-                message: "Invalid credentials",
-            });
-        }
-
-        // 4. Compare password
-        // FIX: user.password_hash can now be safely accessed from the destructured data
         const isMatch = await bcrypt.compare(password, user.password_hash);
-
         if (!isMatch) {
-            return res.status(401).json({
-                success: false,
-                message: "Invalid credentials", // Standard secure message instead of "Wrong password"
-            });
+            return res.status(401).json({ success: false, message: "Invalid credentials" });
         }
 
-        // Ensure JWT Secret is present before signing
         const jwtSecret = process.env.JWT_SECRET;
-        if (!jwtSecret) {
-            throw new Error("JWT_SECRET is missing from your environment variables.");
+        const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET;
+        if (!jwtSecret || !jwtRefreshSecret) {
+            throw new Error("JWT environment configurations are missing.");
         }
 
-        // 5. Generate JWT
-        const token = jwt.sign(
-            {
-                id: user.id,
-                email: user.email,
-                role: user.role
-            },
+        // 1. Generate short-lived Access Token (15 mins)
+        const accessToken = jwt.sign(
+            { id: user.id, email: user.email, role: user.role, name: user.name },
             jwtSecret,
-            {
-                expiresIn: "7d",
-            }
+            { expiresIn: "15m" }
         );
 
-        // 6. Send response
+        // 2. Generate long-lived Refresh Token (7 days)
+        const refreshToken = jwt.sign(
+            { id: user.id },
+            jwtRefreshSecret,
+            { expiresIn: "7d" }
+        );
+
+        // 3. Save the refresh token to the database column
+        const { error: updateError } = await supabase
+            .from('users')
+            .update({ refresh_token: refreshToken })
+            .eq('id', user.id);
+
+        if (updateError) {
+            return res.status(500).json({ success: false, message: "Failed to store session.", error: updateError });
+        }
+
+        // 4. Return BOTH tokens in the body
         return res.status(200).json({
             success: true,
             message: "Login successful",
-            token,
-            user: {
-                id: user.id,
-                name: user.name,
-                email: user.email,
-                role: user.role,
-                is_email_verified: user.is_email_verified,
-                two_factor_enabled: user.two_factor_enabled,
-            },
+            access_token: accessToken,
+            refresh_token: refreshToken, // The frontend must manually store this (e.g., in localStorage or memory)
+            user: { id: user.id, name: user.name, email: user.email, role: user.role },
+        });
+    } catch (error: any) {
+        return res.status(500).json({ success: false, message: "Server error", error: error.message });
+    }
+};
+
+
+export const refreshTokenHandler = async (req: any, res: any) => {
+    try {
+        const { refresh_token }: any = req.body;
+
+        if (!refresh_token) {
+            return res.status(400).json({ success: false, message: "Refresh token is required." });
+        }
+
+        const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET;
+        const jwtSecret = process.env.JWT_SECRET;
+        if (!jwtSecret || !jwtRefreshSecret) {
+            throw new Error("JWT secrets misconfigured.");
+        }
+
+        // 1. Verify structure of the current token
+        const decoded = jwt.verify(refresh_token, jwtRefreshSecret) as any;
+
+        // 2. Fetch the user row
+        const { data: user, error } = await supabase
+            .from("users")
+            .select("id, email, role, refresh_token")
+            .eq("id", decoded.id)
+            .maybeSingle();
+
+        if (error || !user) {
+            return res.status(401).json({ success: false, message: "User session not found." });
+        }
+
+        // 3. Detect Reuse: If the sent token doesn't match the one in the DB, 
+        // it means this token was already used or revoked!
+        if (user.refresh_token !== refresh_token) {
+            // SECURITY BREACH WARNING: Revoke the current valid token as a safety measure
+            await supabase.from("users").update({ refresh_token: null }).eq("id", user.id);
+            return res.status(403).json({ success: false, message: "Breach detected. Session revoked." });
+        }
+
+        // 4. Generate a fresh Access Token
+        const newAccessToken = jwt.sign(
+            { id: user.id, email: user.email, role: user.role },
+            jwtSecret,
+            { expiresIn: "15m" }
+        );
+
+        // 5. ROTATION: Generate a brand NEW Refresh Token
+        const newRefreshToken = jwt.sign(
+            { id: user.id },
+            jwtRefreshSecret,
+            { expiresIn: "7d" }
+        );
+
+        // 6. Overwrite the old token in the database immediately
+        await supabase
+            .from("users")
+            .update({ refresh_token: newRefreshToken })
+            .eq("id", user.id);
+
+        // 7. Send BOTH new tokens back to the frontend
+        return res.status(200).json({
+            success: true,
+            access_token: newAccessToken,
+            refresh_token: newRefreshToken // The client must replace their old stored token with this one
+        });
+    } catch (error: any) {
+        return res.status(401).json({
+            success: false,
+            message: "Invalid or expired refresh token session.",
+        });
+    }
+};
+
+/**
+ * Handles user logout by permanently revoking their stored refresh token.
+ */
+export const logoutHandler = async (req: any, res: any) => {
+    try {
+        // 1. Extract the token string from the request body
+        const { refresh_token } : any = req.body;
+
+        if (!refresh_token) {
+            return res.status(400).json({
+                success: false,
+                message: "Refresh token is required to execute logout.",
+            });
+        }
+
+        // 2. Clear out the database column matching this specific token
+        // This renders the token completely useless if someone attempts to reuse it
+        const { data, error } = await supabase
+            .from("users")
+            .update({ refresh_token: null })
+            .eq("refresh_token", refresh_token)
+            .select("id"); // Returns the affected row data if found
+
+        if (error) {
+            return res.status(500).json({
+                success: false,
+                message: "Database error during logout.",
+                error: error.message
+            });
+        }
+
+        // 3. If no rows were updated, it means the token was already invalid or rotated
+        if (!data || data.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "Session not found or already logged out.",
+            });
+        }
+
+        // 4. Send absolute success response
+        return res.status(200).json({
+            success: true,
+            message: "Logged out successfully. Secure session cleared.",
         });
     } catch (error: any) {
         return res.status(500).json({
             success: false,
-            message: "Server error",
+            message: "Server error attempting account logout.",
             error: error.message,
         });
     }
 };
+
+
+export const profileHandler = async (req: any, res: any) => {
+    // TypeScript accurately knows req.user exists because of the interface extension!
+    return res.status(200).json({
+        success: true,
+        message: "Protected user account data retrieved successfully.",
+        user: req.user,
+    });
+}

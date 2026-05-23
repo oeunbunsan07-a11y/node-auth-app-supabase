@@ -1,6 +1,7 @@
 import express from "express";
 import dotenv from "dotenv";
 import { authRouter } from "./routes/auth.route.ts";
+import { adminRouter } from "./routes/admin.route.ts";
 
 // 1. Load environment variables before initializing the app
 dotenv.config();
@@ -20,6 +21,7 @@ app.get("/health", (req: any, res: any) => {
 });
 
 app.use("/api/auth", authRouter);
+app.use("/api/dashboard/admin", adminRouter);
 
 // 4. Server Initialization
 app.listen(PORT, () => {
