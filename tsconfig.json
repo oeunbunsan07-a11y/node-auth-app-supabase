@@ -1,6 +1,8 @@
 {
   // Visit https://aka.ms/tsconfig to read more about this file
   "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
     // File Layout
     // "rootDir": "./src",
     // "outDir": "./dist",
@@ -37,7 +39,6 @@
     "skipLibCheck": true,
     "moduleResolution": "NodeNext",
     "esModuleInterop": true,
-    
     "allowImportingTsExtensions": true,
     "noEmit": true,
   }
