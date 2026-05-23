@@ -13,7 +13,7 @@ const PORT = process.env.PORT || 8000;
 
 // Allow requests from your frontend development server
 app.use(cors({
-  origin: 'https://node-auth-app-supabase.onrender.com',
+  origin: 'http://localhost:8081', // Must match with frontend url.
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
